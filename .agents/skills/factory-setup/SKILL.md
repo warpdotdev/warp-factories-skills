@@ -36,16 +36,63 @@ The Factory MCP is always mounted at `{server_root}/api/v1/mcp/factory`. Third-p
 
 ## Step 2 — Get the CLI and an API key
 
-Warp's CLI ships as `oz` through soft launch; it is renamed to `warp` at GA. Mention this once so the user isn't confused if they see the CLI called `warp` elsewhere later.
+`oz` is the CLI for Warp's cloud agent platform, and it is what Factory MCP setup uses. Install it **directly from a package manager** — it is a standalone CLI with no dependency on the Warp desktop app. The desktop app happens to bundle a copy, but never tell the user to install the app in order to get `oz`: that couples an external user to a GUI they don't need, and an app-bundled binary disappears when the app is removed.
 
-- **Installing `oz`:** the install command is not finalized yet.
-  > **PLACEHOLDER — do not invent a command here.** Ask the user how they installed/would install `oz`, or point them at `https://docs.warp.dev` for the current instructions. Do not guess a package name, curl-pipe URL, or script.
+Do not confuse `oz` with the **Warp Agent CLI** (`warp`, Homebrew cask `warp-agent-cli`). That is a different product — an interactive agent CLI — and it is not the Factory interface. It has no `login` or `api-key` subcommands. If the user has `warp` on their PATH, that is not `oz`.
 
-Once the CLI is available and logged in (`oz login`), mint an API key for the harness to use:
+### Install `oz`
+
+**macOS** — Homebrew (requires macOS 14 Sonoma or newer):
+
+```bash
+brew tap warpdotdev/warp
+brew update
+brew trust --cask warpdotdev/warp/oz
+brew install --cask oz
+```
+
+The `brew trust` line is required on Homebrew 6 and newer, which refuses to load casks from third-party taps until they're trusted — without it the install fails with `Refusing to load cask warpdotdev/warp/oz from untrusted tap warpdotdev/warp`. It is a no-op on older Homebrew. Don't skip `brew update` either: a stale local clone of the tap pins an old CLI version. Verified end to end on Homebrew 6.0.18, installing `oz` to `/opt/homebrew/bin/oz`.
+
+If the user already has the `oz@preview` cask installed, that is the preview channel and provides a differently-named binary — it does not give them `oz`, so install the stable cask anyway.
+
+**Linux** — once the Warp package repository is configured, the package is `oz-stable`:
+
+```bash
+sudo apt install oz-stable     # Debian / Ubuntu
+sudo yum install oz-stable     # RHEL / Fedora / CentOS
+sudo pacman -S oz-stable       # Arch
+```
+
+If the repository isn't configured yet, install a downloaded package instead — these installers add the Warp repository themselves, so later updates come through the normal package manager. Swap `arch=aarch64` for ARM, and `package=rpm` / `package=pacman` for other distros:
+
+```bash
+curl -fL -o oz.deb "https://app.warp.dev/download/cli?os=linux&package=deb&arch=x86_64"
+sudo apt install ./oz.deb
+```
+
+**Windows** — there is no standalone `oz` package; the docs state "A standalone CLI package is not currently available on Windows." Either run `oz` inside WSL using the Linux instructions above, or fall back to the desktop app (`winget install Warp.Warp`), which bundles it. Don't invent a standalone Windows install.
+
+Confirm the install before continuing — `oz --version` should print a version, and `oz` must resolve on `PATH`:
+
+```bash
+oz --version
+```
+
+If a platform's install fails or the user is somewhere not covered above, point them at `https://docs.warp.dev/reference/cli/` for current instructions rather than guessing a package name or a curl-pipe script.
+
+### Log in and mint an API key
+
+```bash
+oz login
+```
+
+This opens a browser authorization flow, works on local and remote machines, and needs no API key of its own. Then mint a key for the harness to use:
 
 ```bash
 oz api-key create --expires-in 30d "factory-setup"
 ```
+
+`--expires-in` accepts durations like `30d`, `12h`, `90m`; `--expires-at <RFC3339>` and `--no-expiration` are the alternatives. Keys can also be created in the web app under Settings if the user would rather not use the CLI. API keys look like `wk-...`.
 
 Treat the printed key as a secret: export it to an environment variable (e.g. `WARP_API_KEY`) and use that variable everywhere below. Never paste it into a config file that gets committed, and never print it back to a shared terminal or log.
 
