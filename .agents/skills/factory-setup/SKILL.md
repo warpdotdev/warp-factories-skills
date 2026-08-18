@@ -14,12 +14,12 @@ This skill:
 2. Installs/authenticates the CLI and mints an API key.
 3. Registers the Factory MCP server for that harness.
 4. Verifies the connection (tools visible, `list_factories` works, canonical skill readable).
-5. Optionally helps pick or create a factory and save it as the default.
+5. Helps pick or create a factory, including walking the user through authorizing the code forge, standing up an environment, and connecting integrations.
 6. Stops and hands off to the server-served operating skill for everything after setup.
 
 This skill does **not**:
 - Duplicate the day-2 operating playbook — that lives at `skill://warp/factory-mcp/SKILL.md` on the MCP connection itself and is the authoritative source once connected.
-- Automate Slack, Linear, or GitHub integration OAuth for a factory. Point the user at the Factory web app for those; do not attempt to script them here.
+- Complete browser consent flows on the user's behalf. Several steps below open a browser to install a GitHub/GitLab app or connect Slack/Linear/Jira; drive the user through those and verify the result, but never claim a connection succeeded without checking.
 
 ## Step 1 — Pick a server root
 
@@ -105,7 +105,7 @@ Any client that supports streamable HTTP with custom headers can connect directl
 
 From the harness with the MCP server attached:
 
-1. List tools (`tools/list` or the client's equivalent) and confirm the Factory tools are present: `list_factories`, `create_factory`, `list_tasks`, `search_task`, `get_task`, `message_foreman`, `get_conversation`, `send_task`, `complete_task`, `list_notification_routes`.
+1. List tools (`tools/list` or the client's equivalent) and confirm the Factory tools are present: `list_factories`, `create_factory`, `list_tasks`, `search_task`, `get_task`, `message_foreman`, `get_conversation`, `send_task`, `complete_task`, `list_notification_routes`, `get_factory_file_schema`, `validate_factory_files`. Treat the live list as authoritative — it grows, so extra tools are fine and only missing ones are a problem.
 2. Call `list_factories`. Success is any response without an auth error — an empty list just means the principal has no factories yet, which is fine.
 3. Read the resource `skill://warp/factory-mcp/SKILL.md`. A successful read proves the handoff to the operating skill works. Day-2 Factory use depends on this operating skill, so if the harness can't do `resources/read` itself (some tool-only clients don't), don't just tell the user to "fetch it manually" — fetch it yourself with one standalone JSON-RPC call against the same authenticated endpoint (verified: this works without a prior `initialize` handshake) and put the returned text somewhere the agent will read it before starting real Factory work:
 
@@ -121,13 +121,91 @@ From the harness with the MCP server attached:
 
 If any step fails, stop and report the exact error instead of guessing a fix — see Troubleshooting below.
 
-## Step 5 — Optional: pick or create a factory
+## Step 5 — Pick or create a factory
 
-Setup is complete once Step 4 passes; this step is optional follow-up, not the success bar.
+Connection setup is complete once Step 4 passes. If the user only wanted MCP access, stop there. If they want to create a factory, the rest of this step is required work, not optional polish — a new user cannot create a working factory without authorizing the code forge first.
 
-- If the user already has a factory, use `list_factories` to find its `factory_uid` and, if they want, save it as their default per the operating skill's `~/.warp/factory/config.json` contract (`skill://warp/factory-mcp/references/factory-config.md`).
-- If they want a new factory, `create_factory` needs `team_uid`, `name`, `code_forge`, and at least one `repositories` entry (`owner/repo`); `integrations` is optional. Avatars are REST-only, not settable over MCP.
-- Connecting Slack, Linear, GitHub, or Jira integrations for a factory is out of scope here — send the user to the Factory web app for that; do not try to script integration OAuth from this skill.
+Everything below runs through the `oz` CLI plus the `create_factory` MCP tool. Factory MCP itself carries no environment, integration, or code-forge tools — only `get_factory_file_schema`/`validate_factory_files` round out the day-2 set from Step 4 — which is why this step reaches for `oz` instead of MCP calls for everything except `create_factory` itself. A few things still need a browser detour, and nothing in `oz` or MCP substitutes for them: authorizing the code forge (5a), connecting Jira (5c — the CLI drives Slack and Linear only), binding the identity behind a notification route (5c), and finding a `team_uid` for a brand-new user's first-ever factory (5d). Everything else — environments, Slack/Linear connection, and the factory itself — can be driven from here.
+
+If the user **already has a factory**, use `list_factories` to find its `factory_uid` and, if they want, save it as their default per the operating skill's `~/.warp/factory/config.json` contract (`skill://warp/factory-mcp/references/factory-config.md`). Nothing below is needed.
+
+### 5a — Authorize the code forge (required, and the usual failure)
+
+`create_factory` validates repository access up front, and this is the single most likely blocker for a new user. What that looks like depends on the forge:
+
+- **GitHub**: without the Warp GitHub app installed and granted on the target repositories, every attempt fails with `Failed to create factory: GitHub repositories not found or inaccessible: owner/repo`. This is **not** the `integrations` field — the code forge is configured through `code_forge` plus repository access, and Warp prompts to install or update its GitHub app, in a browser flow, when the user creates an environment or an integration. So authorization is a side effect of 5b/5c rather than a standalone command.
+- **GitLab**: the same repository-access check runs against a GitLab connection instead of an app install. An unauthenticated user gets a distinct "authenticate with GitLab" error carrying a browser URL; an authenticated user whose connection can't see the repo gets the same "not found or inaccessible" wording GitHub uses, with GitLab named instead.
+
+Either way, nothing here can discover repositories for the user — `owner/repo` strings always come from them; there is no headless repo-listing call in Factory MCP or `oz`.
+
+If one of the messages above appears, do not retry blindly and do not conclude the repo name is wrong. Check the obvious causes in order: the repository really doesn't exist or is misspelled; the forge app/connection isn't authorized for that account or org; or it is authorized but that specific repository wasn't granted (GitHub's "only select repositories" installs are the common case). Then send the user to complete or update the authorization in the browser, wait, and retry.
+
+### 5b — Environment
+
+Factory agents run in a cloud environment. Omit `default_environment` from `create_factory` and a managed one is auto-created from the factory name and repositories — the simplest path when the user wants no integrations.
+
+Watch the ordering, though: `oz integration create` in 5c requires an existing `--environment` UID, and the auto-created one doesn't exist until the factory does. **If the user wants any integrations, create the environment explicitly first**, use its UID for both the integrations and `default_environment`. Otherwise you'd have to create the factory, then wire integrations against an environment that only appeared afterward.
+
+To create one explicitly:
+
+```bash
+oz environment create --name <name> --docker-image <image> --repo <owner/repo> --setup-command "<command>"
+```
+
+`oz environment list` shows existing environments and their UIDs. Creating an environment is also what triggers the GitHub app prompt from 5a for a user who has never authorized it.
+
+### 5c — Choose and connect integrations
+
+Integrations are how work reaches the factory from outside — a Slack thread, a Linear issue, or a Jira ticket assigned to the agent. Walk the user through this rather than sending them away.
+
+`slack`, `linear`, and `jira` are the valid entries in the `integrations` array. `github` is rejected (`integrations contains unsupported provider "github"`) because the code forge is not an integration in this sense. `oz`, though, only drives two of the three: `oz integration create` supports `slack` and `linear` only. There is no CLI command to connect Jira — that has to happen in the web app (team settings), after which `jira` is a normal entry in `create_factory`'s `integrations` array just like the other two. The gap is only in *starting* the Jira connection, not in declaring it on the factory afterward.
+
+For Slack and Linear, first show the user where they stand:
+
+```bash
+oz integration list
+```
+
+Each provider reports one of three states, and they mean different things:
+
+| Status | Meaning | What's needed |
+| --- | --- | --- |
+| `This integration is not connected.` | no workspace grant | connect, then configure |
+| `Connection is active, but the agent integration has not been configured yet.` | workspace granted, no agent wired | configure only |
+| configured (shows an environment and timestamps) | ready | nothing |
+
+`oz integration list`/`oz integration create` need a real user principal — if the credential behind the CLI session is a team/service-account key rather than the interactively-logged-in user from `oz login` (Step 2), expect a users-only rejection instead of the statuses above.
+
+Ask which integrations the user wants, presenting all three and letting them decline — an empty `integrations` array **is** accepted, and creation will succeed without any. Be honest about the tradeoff instead of implying it's mandatory: with none, the factory has no external intake channel, so work can only be sent through the MCP tools and the web app. That's a legitimate choice for a test factory.
+
+For each of Slack/Linear they pick:
+
+```bash
+oz integration create slack --environment <ENV_UID>
+oz integration create linear --environment <ENV_UID>
+```
+
+This links the integration to the team and environment, opens a browser flow to install the app into their Slack or Linear workspace, and generates an integration ID. The browser step is the user's to complete — say so, wait for them, then re-run `oz integration list` and confirm the status actually changed before moving on. A provider can be connected at the workspace level yet still unusable for notifications; `list_notification_routes` reports `connected: true` alongside an `unavailable_reason` such as `identity_not_bound` — a browser-only identity bind, not something re-running the CLI fixes — and an empty `routes` array. Report that honestly rather than calling it done. Only `slack:self_dm` and `linear:issue` are selectable routes today; there is no Jira route, so a connected Jira integration carries no notification route of its own yet.
+
+For Jira, send the user to the web app to start the connection, then treat `create_factory`'s `integrations` array as the source of truth for whether it's attached — the CLI has no Jira status command to confirm connection state.
+
+### 5d — Create the factory
+
+```
+create_factory(
+  team_uid,        # see below — there is no list-my-teams call
+  name,
+  code_forge,      # GITHUB or GITLAB
+  repositories,    # ["owner/repo", ...]
+  integrations,    # ["slack"], ["linear"], ["jira"], any combination, or []
+)
+```
+
+All five are required by the schema; `repositories` and `integrations` are nullable, so `[]` is a valid value for integrations. Optional: `description`, `alias` (unique per workspace, case-insensitive), `default_environment`, `default_model`.
+
+**`team_uid` has no headless discovery path for a brand-new user.** `oz whoami` reports the caller's workspace, not a team UID, and neither `oz` nor Factory MCP exposes a "list my teams" call. If the user already has at least one factory, reuse the `team_uid` field `list_factories` returns for it — that's a real, headless path once a first factory exists. For someone creating their very first factory in a team, there is no way around opening the web app and copying the team UID from there; say so plainly instead of guessing at the workspace UID `oz whoami` prints.
+
+Afterward, offer to save the new `factory_uid` as the user's default per the config contract referenced above.
 
 ## Step 6 — Hand off and stop
 
@@ -137,5 +215,7 @@ Once verified, tell the user setup is done. Day-2 operation — finding tasks, d
 
 - **404 / feature-disabled-looking error at the MCP URL**: Factory MCP is not enabled for the user's account yet. Report that and stop; it is not a skill bug, and no other host is a valid substitute.
 - **401 Unauthorized**: the API key is missing, wrong, or expired. Recreate it (Step 2) and re-register.
+- **A clean "not allowed"/access-denied response from a factory call, distinct from an auth error**: the account is outside the Factory access rollout. That is a deliberate denial, not an outage or a bug — nothing in this skill can grant access; report it and stop.
 - **OAuth client not found / OAuth flow rejected / DCR failure**: expected — Factory MCP has no OAuth client registered for third-party harnesses. Use the API key path from Step 2 instead of debugging the flow.
+- **A users-only rejection from `oz integration list`/`oz integration create`**: the CLI session is authenticated as a team/service-account credential, not the user from `oz login`. Re-authenticate as the user and retry.
 - **`resources/read` for the skill URI fails or is unsupported**: some clients don't implement MCP resources. The tool surface still works, but fetch the canonical skill yourself with the standalone `curl` call in Step 4 rather than leaving the user without it.
