@@ -25,34 +25,31 @@ This skill does **not**:
 
 The Factory MCP is always mounted at `{server_root}/api/v1/mcp/factory`. Third-party harnesses do not know Warp's server root on their own, so make it explicit up front:
 
-| Target | Server root | CLI binary |
+| Server root | CLI binary | MCP URL |
 | --- | --- | --- |
-| Warp Factory (public, once enabled) | `https://app.warp.dev` | `oz` |
-| Internal staging / dogfood rehearsal | `https://staging.warp.dev` | `oz-dev` |
+| `https://app.warp.dev` | `oz` | `https://app.warp.dev/api/v1/mcp/factory` |
 
 - If the machine already sets `FACTORY_MCP_URL`, use it verbatim instead of building one.
 - If it sets `WARP_SERVER_ROOT` instead, build the URL as `{WARP_SERVER_ROOT}/api/v1/mcp/factory`.
-- Otherwise ask which target the user means, or default to the public root (`https://app.warp.dev`) for an external user with no other context.
-- As of this writing, the hosted Factory MCP is confirmed enabled on **staging**; enablement on the public/prod server root is a separate, server-side rollout this skill does not control. If registering against the public root fails with a not-found/disabled-feature style error, tell the user Factory MCP isn't turned on for that server yet — don't guess around it or silently fall back to staging.
+- Otherwise use `https://app.warp.dev` — do not ask the user to pick a server root, and do not point them at any other host.
+- If registering or calling the MCP URL fails with a not-found/disabled-feature style error, tell the user Factory MCP isn't turned on for their account yet and stop — don't guess around it or substitute a different host.
 
 ## Step 2 — Get the CLI and an API key
 
 Warp's CLI ships as `oz` through soft launch; it is renamed to `warp` at GA. Mention this once so the user isn't confused if they see the CLI called `warp` elsewhere later.
 
-- **Installing `oz` (public):** the install command for external, non-Warp users is not finalized yet.
+- **Installing `oz`:** the install command is not finalized yet.
   > **PLACEHOLDER — do not invent a command here.** Ask the user how they installed/would install `oz`, or point them at `https://docs.warp.dev` for the current instructions. Do not guess a package name, curl-pipe URL, or script.
-- **Installing `oz-dev` (staging/internal rehearsal only):** already present in Warp dogfood/dev environments; not for external users.
 
-Once the CLI is available and logged in (`oz login`, or `oz-dev login` on staging), mint an API key for the harness to use:
+Once the CLI is available and logged in (`oz login`), mint an API key for the harness to use:
 
 ```bash
-oz api-key create --expires-in 30d "factory-setup"        # public / prod
-oz-dev api-key create --expires-in 30d "factory-setup"    # staging rehearsal
+oz api-key create --expires-in 30d "factory-setup"
 ```
 
 Treat the printed key as a secret: export it to an environment variable (e.g. `WARP_API_KEY`) and use that variable everywhere below. Never paste it into a config file that gets committed, and never print it back to a shared terminal or log.
 
-API key + `Authorization: Bearer` is the default, prod-safe auth path and works on every harness. OAuth is a secondary, best-effort option — see each harness's "OAuth alternative" note below — and is not guaranteed to be registered on every server root.
+API key + `Authorization: Bearer` is the supported auth path and works on every harness. Use it everywhere below. OAuth is not available for third-party clients today: Factory MCP does not support dynamic client registration, and no per-harness OAuth client is registered for external use — so a client's built-in "connect with OAuth" flow will fail. If a harness tries OAuth on its own and fails, fall back to the API key rather than debugging the OAuth flow.
 
 ## Step 3 — Detect the harness and register the MCP server
 
@@ -67,14 +64,7 @@ claude mcp add --transport http warp-factory {mcp_url} \
 
 Flag names can shift between Claude Code versions — run `claude mcp add --help` first if this fails. Verified against `@anthropic-ai/claude-code` (`mcp add --transport http ... --header "..."`) as of this writing.
 
-**OAuth alternative** (only where the target server root has registered the client, currently staging):
-
-```bash
-claude mcp add --transport http warp-factory {mcp_url} --client-id warp-factory-claude-code
-claude mcp login warp-factory
-```
-
-`mcp add --client-id` only registers the server against the pre-registered client id; it does not by itself run the OAuth exchange. `mcp login <name>` is the command that starts the browser authorization flow for an already-configured server. Verified against `@anthropic-ai/claude-code`: this sequence produces a real `https://staging.warp.dev/api/v1/oauth/authorize?...&client_id=warp-factory-claude-code&...` URL with the expected loopback `redirect_uri`.
+Do not use `claude mcp login` / `--client-id` here — see the OAuth note in Step 2.
 
 ### Codex
 
@@ -84,13 +74,7 @@ codex mcp add warp-factory --url {mcp_url} --bearer-token-env-var WARP_API_KEY
 
 This writes a `[mcp_servers.warp-factory]` block to `~/.codex/config.toml` with `url` and `bearer_token_env_var`; Codex reads the bearer token from that environment variable at connect time, so make sure `WARP_API_KEY` is exported in the same shell/session Codex runs in. Verified against `@openai/codex` (`mcp add <name> --url ... --bearer-token-env-var ...`).
 
-**OAuth alternative** (staging only today):
-
-```bash
-codex mcp add warp-factory --url {mcp_url} --oauth-client-id warp-factory-codex
-```
-
-This writes a nested `[mcp_servers.warp-factory.oauth]` table with `client_id = "warp-factory-codex"` and immediately starts the OAuth flow, printing a real authorize URL to visit. Verified against `@openai/codex`: the printed URL correctly targets `https://staging.warp.dev/api/v1/oauth/authorize` with `client_id=warp-factory-codex`. Use `codex mcp login warp-factory` later to re-authenticate the same already-configured server without re-running `add`.
+Do not use `--oauth-client-id` / `codex mcp login` here — see the OAuth note in Step 2.
 
 ### Cursor
 
@@ -111,22 +95,7 @@ Cursor has no MCP CLI; edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` 
 
 Cursor resolves `${env:VAR}` references in `headers` from its own process environment at connect time — never inline the raw key in this file, since a project-scoped `.cursor/mcp.json` is easy to commit or expose. Make sure `WARP_API_KEY` is actually set in Cursor's launch environment: a shell-only export in `.bashrc`/`.zshrc` is not always inherited by a desktop app launched outside that shell, so prefer launching Cursor from a terminal where `echo $WARP_API_KEY` already prints the value, or set it somewhere Cursor's launcher reliably reads (e.g. `/etc/environment` on Linux). Restart Cursor after editing, then check Settings → Tools & MCP for a green connection.
 
-**OAuth alternative** (staging only today): Factory MCP has no dynamic client registration, so Cursor's default discovery/DCR fallback will fail here — use the `auth` block with the pre-registered client id instead of `headers`:
-
-```json
-{
-  "mcpServers": {
-    "warp-factory": {
-      "url": "{mcp_url}",
-      "auth": {
-        "CLIENT_ID": "warp-factory-cursor"
-      }
-    }
-  }
-}
-```
-
-Restart Cursor, open Settings → Tools & MCP, and click Connect on `warp-factory` to start the browser authorization flow.
+Use the `headers` block above, not an `auth` block: Factory MCP has no dynamic client registration, so Cursor's discovery/DCR fallback will fail — see the OAuth note in Step 2.
 
 ### Generic / any other MCP-capable client
 
@@ -166,7 +135,7 @@ Once verified, tell the user setup is done. Day-2 operation — finding tasks, d
 
 ## Troubleshooting
 
-- **404 / feature-disabled-looking error at the MCP URL**: Factory MCP is not enabled for that server root. This is expected on the public root until it is rolled out there; it is not a skill bug.
+- **404 / feature-disabled-looking error at the MCP URL**: Factory MCP is not enabled for the user's account yet. Report that and stop; it is not a skill bug, and no other host is a valid substitute.
 - **401 Unauthorized**: the API key is missing, wrong, or expired. Recreate it (Step 2) and re-register.
-- **OAuth client not found / OAuth flow rejected**: that harness's OAuth client (`warp-factory-claude-code` / `warp-factory-codex` / `warp-factory-cursor`) is not registered on the target server root yet. Fall back to the API key path — it always works.
+- **OAuth client not found / OAuth flow rejected / DCR failure**: expected — Factory MCP has no OAuth client registered for third-party harnesses. Use the API key path from Step 2 instead of debugging the flow.
 - **`resources/read` for the skill URI fails or is unsupported**: some clients don't implement MCP resources. The tool surface still works, but fetch the canonical skill yourself with the standalone `curl` call in Step 4 rather than leaving the user without it.
