@@ -149,10 +149,13 @@ Watch the ordering, though: `oz integration create` in 5c requires an existing `
 To create one explicitly:
 
 ```bash
-oz environment create --name <name> --docker-image <image> --repo <owner/repo> --setup-command "<command>"
+oz environment image list
+oz environment create --team --name <name> --docker-image <image> --repo <owner/repo> --setup-command "<command>"
 ```
 
-`oz environment list` shows existing environments and their UIDs. Creating an environment is also what triggers the GitHub app prompt from 5a for a user who has never authorized it.
+Two flags matter beyond the obvious ones. `--docker-image` has no interactive fallback here: leave it off and `oz environment create` prompts the user to pick from a menu, which a coding agent can't answer, so always resolve a real value from `oz environment image list` first and pass it explicitly. `--team` (as opposed to `--personal`) matters because `create_factory` validates that `default_environment` belongs to the *same team* as the factory, and rejects a personally-scoped UID with `default_environment must belong to the same team as the factory` — an error that names the factory, not the environment created two steps earlier, so a personal environment here is easy to misdiagnose. The same team-scoped environment is what 5c's `oz integration create --environment` links to, so `--team` is the right scope either way.
+
+`oz environment list` shows existing environments, their UIDs, and their scope. Creating an environment is also what triggers the GitHub app prompt from 5a for a user who has never authorized it.
 
 ### 5c — Choose and connect integrations
 
@@ -166,13 +169,13 @@ For Slack and Linear, first show the user where they stand:
 oz integration list
 ```
 
-Each provider reports one of three states, and they mean different things:
+`oz integration list` reports one of three states per provider. Recognize the state by what it means rather than matching its wording exactly — the CLI's phrasing can shift and isn't pinned down here:
 
-| Status | Meaning | What's needed |
-| --- | --- | --- |
-| `This integration is not connected.` | no workspace grant | connect, then configure |
-| `Connection is active, but the agent integration has not been configured yet.` | workspace granted, no agent wired | configure only |
-| configured (shows an environment and timestamps) | ready | nothing |
+| State | What's needed |
+| --- | --- |
+| Not connected: no workspace grant exists yet | connect, then configure |
+| Connected at the workspace level, but the agent side isn't wired up yet | configure only |
+| Connected and configured (shows an environment and timestamps) | nothing |
 
 `oz integration list`/`oz integration create` need a real user principal — if the credential behind the CLI session is a team/service-account key rather than the interactively-logged-in user from `oz login` (Step 2), expect a users-only rejection instead of the statuses above.
 
